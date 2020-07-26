@@ -51,7 +51,7 @@ SEPARATORS = [
     ]
 
 DEFAULT_CFG = {
-    "ellipsis"          : u("\u2026"),
+    "ellipsis"          : u("..."), #"\u2026"),
     "inf_string"        : u("\u221e"),
     "nan_string"        : u("NaN"),
     "precision_max"     : u("6"),
@@ -87,7 +87,7 @@ def as_bool(value):
         elif lower == "false":
             return False
         else:
-            raise ValueError("not a bool: {}".format(value))
+            raise ValueError("not a bool: '{}'".format(value))
     
     raise TypeError("not a bool: {}".format(value))
 
@@ -98,6 +98,10 @@ def as_float(value):
     if value == "":
         return NAN
     return float(value)
+
+
+def as_str(value):
+    return value
 
 
 TYPE_CONVERTERS = {
@@ -114,15 +118,21 @@ def guess_type(values):
       The type and a convert function.
     """
     for type in TYPES:
+        attempted = False
         convert = TYPE_CONVERTERS.get(type, type)
         try:
             for value in values:
+                if len(value):
+                    attempted = True
                 convert(value)
         except (TypeError, ValueError):
             pass
         else:
-            return type, convert
-    raise RuntimeError("can't guess type")
+            if attempted:
+                return type, convert
+        if not attempted:
+            return str, as_str
+    raise RuntimeError("can't guess type: " + ','.join(values))
 
 
 def get_size(value):
@@ -339,6 +349,8 @@ class DelimitedFileModel:
 
         # Transpose the sample lines into columns.
         cols = tuple(zip(*self.__rows))
+        if not len(cols):
+            raise RuntimeError("Cannot parse")
         # Guess the types for each.
         self.types, self.converts = zip(*[ guess_type(c) for c in cols ])
 
@@ -500,7 +512,7 @@ class GridView:
     View (and controller) for tabular data models.
     """
 
-    def __init__(self, model, cfg={}, num_frozen=0):
+    def __init__(self, model, cfg={}, num_frozen=0, show_linenumbers=True, right_frozen=0):
         """
         @param num_frozen
           The number of frozen columns on the left.
@@ -510,11 +522,14 @@ class GridView:
         self.__formatters = list(model.get_default_formatters(cfg))
 
         self.__num_frozen = num_frozen
+        self.__right_frozen = right_frozen
 
         self.__col0 = self.__num_frozen
         self.__idx0 = 0
         self.__cursor = [0, 0]
         self.__show_cursor = as_bool(self.__cfg["show_cursor"])
+        self.__show_linenumbers = show_linenumbers
+        self.__hiddenColumns = []
 
         self.__screen = None
         self.__encoding = None
@@ -538,6 +553,7 @@ class GridView:
             curses.KEY_NPAGE: lambda: self.__move_by( self.__num_rows),
 
             curses.KEY_PPAGE: lambda: self.__move_by(-self.__num_rows),
+            ord('b')        : lambda: self.__move_by(-self.__num_rows),
 
             ord('d')        : lambda: self.__move_by( self.__num_rows // 2),
             ord('u')        : lambda: self.__move_by(-self.__num_rows // 2),
@@ -565,11 +581,16 @@ class GridView:
             ord('|')        : lambda: self.__toggle_sep(),
             ord('H')        : lambda: self.__toggle_header(),
             ord('F')        : lambda: self.__toggle_footer(),
+            ord('#')        : lambda: self.__toggle_linenumbers(),
+            ord('l')        : lambda: self.__toggle_linenumbers(),
 
             ord(',')        : lambda: self.__change_size(-1),
             ord('.')        : lambda: self.__change_size(+1),
             ord('<')        : lambda: self.__change_precision(-1),
             ord('>')        : lambda: self.__change_precision(+1),
+
+            ord('z')        : lambda: self.__hide_column(),
+            ord('Z')        : lambda: self.__show_all_columns(),
 
             curses.KEY_RESIZE:lambda: self.__set_geometry() # Window resize
             }
@@ -599,7 +620,9 @@ class GridView:
     def __get_last_col(self):
         sep = len(self.__cfg["separator"])
         x = sum( f.width + sep for f in self.__formatters[: self.__num_frozen] )
-        for c in range(self.__col0, self.__model.num_cols):
+        if self.__right_frozen > 0:
+          x += sum( f.width + sep for f in self.__formatters[-self.__right_frozen :] )
+        for c in range(self.__col0, self.__model.num_cols - self.__right_frozen):
             x += self.__formatters[c].width + sep
             if x > self.__screen_width:
                 return c - 1
@@ -658,6 +681,15 @@ class GridView:
     def __toggle_cursor(self):
         self.__show_cursor = not self.__show_cursor
 
+    def __show_all_columns(self):
+        self.__hiddenColumns = []
+
+    def __hide_column(self):
+        if self.__show_cursor:
+            if self.__cursor[1] >= self.__num_frozen:
+                self.__hiddenColumns.append(int(self.__cursor[1]))
+            self.__move(0, +1)
+        self.__show_cursor = True
         
     def __toggle_sep(self):
         sep = self.__cfg["separator"]
@@ -667,6 +699,9 @@ class GridView:
             i = -1
         self.__cfg["separator"] = SEPARATORS[(i + 1) % len(SEPARATORS)]
 
+
+    def __toggle_linenumbers(self):
+        self.__show_linenumbers = not self.__show_linenumbers
 
     def __toggle_header(self):
         self.__cfg["show_header"] = str(not as_bool(self.__cfg["show_header"]))
@@ -805,24 +840,40 @@ class GridView:
             return len(string)
 
         num_frozen  = self.__num_frozen
+        right_frozen  = self.__right_frozen
         col0        = self.__col0
         num_cols    = len(self.__model.names)
         cursor      = self.__cursor
+        hiddenCols  = self.__hiddenColumns
         
         show_cursor = self.__show_cursor
         sep         = self.__cfg["separator"]
         ellipsis    = self.__cfg["ellipsis"]
+
+        nr = len(str(self.__model.num_rows))
 
         # Print title lines first.
         for line in self.__model.title_lines:
             x = write(line)
             y += 1
 
+        cs = (list(range(-right_frozen, 0) if right_frozen else []) 
+                + list(range(num_frozen)) 
+                + list(range(col0, num_cols)))
+
         # The header.
         if as_bool(self.__cfg["show_header"]):
             x = 0
-            for c in list(range(num_frozen)) + list(range(col0, num_cols)):
-                frozen = c < num_frozen
+
+            if self.__show_linenumbers:
+                x += write(formatters.StrFormatter(nr+1, pad_left=True)('#') + ' ', attrs[1])
+
+            for c in cs:
+                if c in hiddenCols:
+                    continue
+                if c < 0:
+                    c = num_cols + c
+                frozen = c < num_frozen or c >= num_cols - right_frozen
                 at_cursor = show_cursor and c == cursor[1]
 
                 col = self.__model.names[c]
@@ -854,12 +905,20 @@ class GridView:
         for i in range(self.__num_rows):
             x   = 0
             idx = self.__idx0 + i
+
+            if self.__show_linenumbers:
+                x += write(formatters.IntFormatter(nr)(idx) + ' ', attrs[1])
+
             row = (
                 self.__model.get_row(idx) 
                 if idx < self.__model.num_rows 
                 else None)
-            for c in list(range(num_frozen)) + list(range(col0, num_cols)):
-                frozen = c < num_frozen
+            for c in cs:
+                if c in hiddenCols:
+                    continue
+                if c < 0:
+                    c = num_cols + c
+                frozen = c < num_frozen or c >= num_cols - right_frozen
                 at_cursor = show_cursor and (idx == cursor[0] or c == cursor[1])
                 at_select = show_cursor and (idx == cursor[0] and c == cursor[1])
 
@@ -937,7 +996,7 @@ class GridView:
             "  DOWN, RETURN       Forward  one line",
             "  UP                 Backward one line",
             "  PGDN, SPACE        Forward  one window",
-            "  PGUP               Backward one window",
+            "  PGUP, b            Backward one window",
             "  d                  Forward  one half-window",
             "  u                  Backward one half-window",
             "  HOME, g            Jump to first row",
@@ -953,6 +1012,7 @@ class GridView:
             "  |                  Cycle column separator",
             "  H                  Toggle header",
             "  F                  Toggle footer",
+            "  #, l               Toggle line numbers",
             "",
             "  INSERT, ~          Toggle cursor",
             "  ,                  Increase width of column at cursor",
@@ -996,7 +1056,7 @@ class GridView:
 
 #-------------------------------------------------------------------------------
 
-def show_model(model, cfg={}, num_frozen=0):
+def show_model(model, cfg={}, num_frozen=0, show_linenumbers=True, right_frozen=0):
     """
     Shows an interactive view of the model on a connected TTY.
 
@@ -1007,13 +1067,13 @@ def show_model(model, cfg={}, num_frozen=0):
     full_cfg.update(cfg)
     cfg = full_cfg
 
-    view = GridView(model, cfg, num_frozen=num_frozen)
+    view = GridView(model, cfg, num_frozen=num_frozen, show_linenumbers=show_linenumbers, right_frozen=right_frozen)
     scr = curses.initscr()
 
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, -1, -1)                                     # normal
-    curses.init_pair(2, curses.COLOR_BLUE, -1)                      # frozen
+    curses.init_pair(2, curses.COLOR_CYAN, -1)                      # frozen
     curses.init_pair(3, -1, -1)                                     # separator
     curses.init_pair(4, -1, -1)                                     # footer
     curses.init_pair(5, curses.COLOR_BLACK, curses.COLOR_WHITE)     # cursor

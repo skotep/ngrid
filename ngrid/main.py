@@ -52,11 +52,23 @@ def main():
         action="store_false", dest="hasHeader",
         help="assume no header row")
 
-    parser.set_defaults(frozenCols=1)
+    parser.set_defaults(showLinenumbers=True)
+    parser.add_option(
+        "-l", "--hide_linenumbers",
+        action="store_false", dest="showLinenumbers",
+        help="hide line numbers")
+
+    parser.set_defaults(frozenCols=0)
     parser.add_option(
         "-f", "--frozen_cols", metavar="NCOLS",
         action="store", type="int", dest="frozenCols",
-        help=("freeze NCOLS columns on the left [default: 1]"))
+        help=("freeze NCOLS columns on the left [default: 0]"))
+
+    parser.set_defaults(rightFrozenCols=0)
+    parser.add_option(
+        "-F", "--right_frozen_cols", metavar="NRCOLS",
+        action="store", type="int", dest="rightFrozenCols",
+        help=("freeze NRCOLS columns on the right [default: 0]"))
     
     parser.set_defaults(bufferSize=100)
     parser.add_option(
@@ -121,7 +133,10 @@ def main():
         # Show the grid.  But while we're in ncurses, capture stdout and stderr
         # for debugging, and show it at the end.
         with closing(OutputSaver()):
-            grid.show_model(model, num_frozen=options.frozenCols)
+            grid.show_model(model,
+                    num_frozen=options.frozenCols,
+                    show_linenumbers=options.showLinenumbers,
+                    right_frozen=options.rightFrozenCols)
 
 
 if __name__ == '__main__':
